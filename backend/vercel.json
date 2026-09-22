@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "main.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "main.py"
+    }
+  ],
+  "env": {
+    "SUPABASE_URL": {
+      "description": "Your Supabase project URL"
+    },
+    "SUPABASE_KEY": {
+      "description": "Your Supabase service role key"
+    },
+    "CITY_NERVE_MODEL_PATH": {
+      "description": "Path to ML model file",
+      "value": "city_nerve_risk_model.pkl"
+    },
+    "CITY_NERVE_CONFIG_PATH": {
+      "description": "Path to ML config file",
+      "value": "city_nerve_config.pkl"
+    }
+  }
+}
