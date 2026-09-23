@@ -11,7 +11,7 @@
 
 const BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ||
-  "/api";
+  "https://city-nerve-backend.vercel.app";
 
 class ApiError extends Error {
   constructor(message, status, payload) {
