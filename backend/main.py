@@ -182,7 +182,7 @@ try:
     )
 
 except Exception as exc:
-    logger.exception("Could not load ML model: %s", exc)
+    logger.exception("Could not load ML model: %s | type=%s | repr=%r", exc, type(exc).__name__, exc)
 
 
 try:
