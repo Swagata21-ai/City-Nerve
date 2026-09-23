@@ -20,3 +20,4 @@ env/
 .DS_Store
 Thumbs.db
 .venv312/
+backend/city_nerve_risk_model.pkl
