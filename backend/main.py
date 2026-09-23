@@ -2110,6 +2110,18 @@ def incidents():
 # LOCATION ANALYSIS
 # =========================================================
 
+@app.get("/debug-model")
+def debug_model():
+    import os
+    return {
+        "model_path": MODEL_PATH,
+        "model_exists": os.path.exists(MODEL_PATH),
+        "model_size": os.path.getsize(MODEL_PATH) if os.path.exists(MODEL_PATH) else 0,
+        "model_loaded": model is not None,
+        "config_exists": os.path.exists(CONFIG_PATH),
+        "config_size": os.path.getsize(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else 0
+    }
+
 @app.post("/location-analysis")
 async def location_analysis(
     data: LocationAnalysisRequest
