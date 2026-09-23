@@ -1,47 +1,22 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.venv/
-.venv312/
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-*.egg-info/
+node_modules/
 dist/
 build/
+.vite/
 
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# Environment variables
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
-# IDE
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-.DS_Store
 
-# ML Models (optional - uncomment if you don't want to commit them)
-# backend/city_nerve_risk_model.pkl
-# backend/city_nerve_config.pkl
-
-# Logs
 *.log
-logs/
-
-# OS
+.DS_Store
 Thumbs.db
+.venv312/
