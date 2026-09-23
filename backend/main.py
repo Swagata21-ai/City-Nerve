@@ -182,10 +182,7 @@ try:
     )
 
 except Exception as exc:
-    logger.warning(
-        "Could not load ML model: %s",
-        exc
-    )
+    logger.exception("Could not load ML model: %s", exc)
 
 
 try:
