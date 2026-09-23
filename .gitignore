@@ -3,7 +3,6 @@ dist/
 build/
 .vite/
 
-.env
 .env.*
 !.env.example
 
@@ -22,3 +21,4 @@ Thumbs.db
 .venv312/
 backend/city_nerve_risk_model.pkl
 backend/city_nerve_risk_model.pkl.gz
+.env
