@@ -66,14 +66,16 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 MODEL_PATH = os.getenv(
     "CITY_NERVE_MODEL_PATH",
-    "city_nerve_risk_model.pkl"
+    os.path.join(BASE_DIR, "city_nerve_risk_model.pkl")
 )
 
 CONFIG_PATH = os.getenv(
     "CITY_NERVE_CONFIG_PATH",
-    "city_nerve_config.pkl"
+    os.path.join(BASE_DIR, "city_nerve_config.pkl")
 )
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
