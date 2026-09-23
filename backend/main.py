@@ -173,16 +173,65 @@ model = None
 model_config: Dict[str, Any] = {}
 explainer = None
 
+MODEL_CACHE_PATH = "/tmp/city_nerve_risk_model.pkl"
+MODEL_GZ_PATH = "/tmp/city_nerve_risk_model.pkl.gz"
+
+
+def ensure_model_file():
+    """Download the compressed ML model from Supabase Storage if needed."""
+    import gzip
+    import shutil
+    import urllib.request
+
+    if os.path.exists(MODEL_CACHE_PATH):
+        return MODEL_CACHE_PATH
+
+    storage_url = (
+        f"{SUPABASE_URL}/storage/v1/object/"
+        "city-nerve-model/city_nerve_risk_model.pkl.gz"
+    )
+
+    logger.info("Downloading CITY NERVE ML model from Supabase Storage...")
+
+    request = urllib.request.Request(
+        storage_url,
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": SUPABASE_KEY
+        }
+    )
+
+    with urllib.request.urlopen(request, timeout=60) as response:
+        with open(MODEL_GZ_PATH, "wb") as output:
+            shutil.copyfileobj(response, output)
+
+    logger.info("Compressed model downloaded: %s bytes", os.path.getsize(MODEL_GZ_PATH))
+
+    with gzip.open(MODEL_GZ_PATH, "rb") as source:
+        with open(MODEL_CACHE_PATH, "wb") as destination:
+            shutil.copyfileobj(source, destination)
+
+    logger.info("Model decompressed: %s bytes", os.path.getsize(MODEL_CACHE_PATH))
+
+    return MODEL_CACHE_PATH
+
+
 try:
-    model = joblib.load(MODEL_PATH)
+    runtime_model_path = ensure_model_file()
+    model = joblib.load(runtime_model_path)
 
     logger.info(
-        "ML model loaded: %s",
-        MODEL_PATH
+        "ML model loaded successfully: %s",
+        runtime_model_path
     )
 
 except Exception as exc:
-    logger.exception("Could not load ML model: %s | type=%s | repr=%r", exc, type(exc).__name__, exc)
+    logger.exception(
+        "Could not load ML model: %s | type=%s | repr=%r",
+        exc,
+        type(exc).__name__,
+        exc
+    )
 
 
 try:
@@ -204,6 +253,7 @@ except Exception as exc:
 
 
 if model is not None:
+
     try:
         explainer = shap.TreeExplainer(model)
 
