@@ -6,19 +6,51 @@ build/
 .env.*
 !.env.example
 
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 .venv/
-venv/
+.venv312/
 env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
 
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
 .vscode/
 .idea/
-
-*.log
+*.swp
+*.swo
+*~
 .DS_Store
-Thumbs.db
-.venv312/
+
+# ML Models - stored in Supabase Storage, not in git
 backend/city_nerve_risk_model.pkl
-backend/city_nerve_risk_model.pkl.gz
-.env
+backend/city_nerve_config.pkl
+backend/*.pkl
+
+# Logs
+*.log
+logs/
+
+# OS
+Thumbs.db

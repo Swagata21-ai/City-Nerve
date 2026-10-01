@@ -36,6 +36,10 @@ from __future__ import annotations
 import os
 import math
 import logging
+import gzip
+import hashlib
+import shutil
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -61,12 +65,17 @@ except Exception:
 # ENVIRONMENT
 # =========================================================
 
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Load the backend .env directly from Python.
+# This works even when VS Code terminal environment injection is disabled.
+load_dotenv(
+    dotenv_path=os.path.join(BASE_DIR, ".env"),
+    override=False
+)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_PATH = os.getenv(
     "CITY_NERVE_MODEL_PATH",
@@ -91,7 +100,7 @@ MAX_ZONE_DISTANCE_KM = 25.0
 # OSM search radius around an arbitrary clicked location.
 OSM_RADIUS_METERS = 1500
 
-APP_VERSION = "6.0.0"
+APP_VERSION = "6.1.0"
 
 
 # =========================================================
@@ -173,72 +182,604 @@ model = None
 model_config: Dict[str, Any] = {}
 explainer = None
 
-MODEL_CACHE_PATH = "/tmp/city_nerve_risk_model.pkl"
-MODEL_GZ_PATH = "/tmp/city_nerve_risk_model.pkl.gz"
+# ---------------------------------------------------------
+# SUPABASE REMOTE MODEL
+# ---------------------------------------------------------
+
+MODEL_BUCKET = os.getenv(
+    "CITY_NERVE_MODEL_BUCKET",
+    "city-nerve-model"
+).strip()
+
+MODEL_OBJECT = os.getenv(
+    "CITY_NERVE_MODEL_OBJECT",
+    "city_nerve_risk_model.pkl.gz"
+).strip()
+
+# This is the PUBLIC Supabase Storage URL supplied for CITY NERVE.
+# No Supabase secret/service key is required to download a public object.
+REMOTE_MODEL_URL = os.getenv(
+    "CITY_NERVE_REMOTE_MODEL_URL",
+    "https://kxdackjrulxpxwjzpjdw.supabase.co/storage/v1/object/public/"
+    "city-nerve-model/city_nerve_risk_model.pkl.gz"
+).strip()
+
+REMOTE_MODEL_ENABLED = (
+    os.getenv(
+        "CITY_NERVE_REMOTE_MODEL_ENABLED",
+        "true"
+    ).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+# true = always refresh the runtime model from Supabase on startup.
+# This is useful while you are updating the Storage model.
+FORCE_REMOTE_MODEL = (
+    os.getenv(
+        "CITY_NERVE_FORCE_REMOTE_MODEL",
+        "true"
+    ).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+# ---------------------------------------------------------
+# LOCAL MODEL / CONFIG
+# ---------------------------------------------------------
+
+LOCAL_MODEL_PATH = Path(MODEL_PATH).resolve()
+LOCAL_GZ_PATH = (
+    Path(BASE_DIR) /
+    MODEL_OBJECT
+).resolve()
+
+# ---------------------------------------------------------
+# RUNTIME CACHE
+# ---------------------------------------------------------
+
+# Windows does not provide the Linux /tmp path used by the
+# previous version, so use a cross-platform cache directory.
+RUNTIME_DIR = (
+    Path(BASE_DIR) /
+    ".city_nerve_cache"
+)
+
+RUNTIME_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+CACHED_GZ_PATH = (
+    RUNTIME_DIR /
+    "city_nerve_risk_model.pkl.gz"
+)
+
+CACHED_PKL_PATH = (
+    RUNTIME_DIR /
+    "city_nerve_risk_model.pkl"
+)
+
+# ---------------------------------------------------------
+# MODEL STATUS
+# ---------------------------------------------------------
+
+MODEL_SOURCE = "NONE"
+MODEL_ERROR = None
+MODEL_SHA256 = None
+MODEL_SIZE = 0
+MODEL_REMOTE_URL_USED = None
 
 
-def ensure_model_file():
-    """Download the compressed ML model from Supabase Storage if needed."""
-    import gzip
-    import shutil
-    import urllib.request
+def calculate_sha256(
+    file_path: Path
+) -> str:
+    """Calculate SHA-256 for a model file."""
 
-    if os.path.exists(MODEL_CACHE_PATH):
-        return MODEL_CACHE_PATH
+    sha256 = hashlib.sha256()
 
-    storage_url = (
-        f"{SUPABASE_URL}/storage/v1/object/"
-        "city-nerve-model/city_nerve_risk_model.pkl.gz"
-    )
+    with open(
+        file_path,
+        "rb"
+    ) as file:
 
-    logger.info("Downloading CITY NERVE ML model from Supabase Storage...")
+        while True:
 
-    request = urllib.request.Request(
-        storage_url,
-        headers={
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "apikey": SUPABASE_KEY
-        }
-    )
+            chunk = file.read(
+                1024 * 1024
+            )
 
-    with urllib.request.urlopen(request, timeout=60) as response:
-        with open(MODEL_GZ_PATH, "wb") as output:
-            shutil.copyfileobj(response, output)
+            if not chunk:
+                break
 
-    logger.info("Compressed model downloaded: %s bytes", os.path.getsize(MODEL_GZ_PATH))
+            sha256.update(
+                chunk
+            )
 
-    with gzip.open(MODEL_GZ_PATH, "rb") as source:
-        with open(MODEL_CACHE_PATH, "wb") as destination:
-            shutil.copyfileobj(source, destination)
-
-    logger.info("Model decompressed: %s bytes", os.path.getsize(MODEL_CACHE_PATH))
-
-    return MODEL_CACHE_PATH
+    return sha256.hexdigest()
 
 
-try:
-    runtime_model_path = ensure_model_file()
-    model = joblib.load(runtime_model_path)
+def validate_gzip_file(
+    file_path: Path
+) -> None:
+    """Verify that the downloaded file is a readable gzip archive."""
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Model archive does not exist: {file_path}"
+        )
+
+    if file_path.stat().st_size < 1024:
+        raise RuntimeError(
+            "Downloaded model archive is suspiciously small."
+        )
+
+    try:
+
+        with gzip.open(
+            file_path,
+            "rb"
+        ) as source:
+
+            source.read(1024)
+
+    except Exception as exc:
+
+        raise RuntimeError(
+            "Downloaded model is not a valid gzip archive: "
+            f"{exc}"
+        ) from exc
+
+
+def download_remote_model() -> Path:
+    """
+    Download the CITY NERVE compressed model from the public
+    Supabase Storage URL.
+    """
+
+    global MODEL_REMOTE_URL_USED
+
+    if not REMOTE_MODEL_URL:
+        raise RuntimeError(
+            "CITY_NERVE_REMOTE_MODEL_URL is empty."
+        )
 
     logger.info(
-        "ML model loaded successfully: %s",
-        runtime_model_path
+        "================================================="
     )
 
-except Exception as exc:
-    logger.exception(
-        "Could not load ML model: %s | type=%s | repr=%r",
-        exc,
-        type(exc).__name__,
-        exc
+    logger.info(
+        "Downloading CITY NERVE ML model from Supabase Storage."
     )
 
+    logger.info(
+        "Bucket: %s",
+        MODEL_BUCKET
+    )
+
+    logger.info(
+        "Object: %s",
+        MODEL_OBJECT
+    )
+
+    logger.info(
+        "Remote URL: %s",
+        REMOTE_MODEL_URL
+    )
+
+    import httpx
+
+    temp_path = (
+        RUNTIME_DIR /
+        "city_nerve_risk_model.download.tmp.gz"
+    )
+
+    # Remove an interrupted previous download.
+    try:
+        if temp_path.exists():
+            temp_path.unlink()
+    except Exception:
+        pass
+
+    headers = {
+        "User-Agent": (
+            "CITY-NERVE/6.1 "
+            "(urban-intelligence-hackathon-project)"
+        ),
+        "Accept": "application/octet-stream",
+    }
+
+    try:
+
+        with httpx.stream(
+            "GET",
+            REMOTE_MODEL_URL,
+            headers=headers,
+            follow_redirects=True,
+            timeout=120.0
+        ) as response:
+
+            response.raise_for_status()
+
+            content_type = (
+                response.headers.get(
+                    "content-type",
+                    ""
+                )
+            )
+
+            logger.info(
+                "Supabase Storage HTTP status: %s",
+                response.status_code
+            )
+
+            logger.info(
+                "Supabase Storage content-type: %s",
+                content_type
+            )
+
+            total_bytes = 0
+
+            with open(
+                temp_path,
+                "wb"
+            ) as output:
+
+                for chunk in response.iter_bytes(
+                    chunk_size=1024 * 1024
+                ):
+
+                    if chunk:
+
+                        output.write(
+                            chunk
+                        )
+
+                        total_bytes += len(
+                            chunk
+                        )
+
+        logger.info(
+            "Remote compressed model downloaded: %s bytes",
+            total_bytes
+        )
+
+        validate_gzip_file(
+            temp_path
+        )
+
+        # Replace the previous runtime archive only after
+        # the new download has passed validation.
+        shutil.move(
+            str(temp_path),
+            str(CACHED_GZ_PATH)
+        )
+
+        MODEL_REMOTE_URL_USED = (
+            REMOTE_MODEL_URL
+        )
+
+        logger.info(
+            "Remote model cached at: %s",
+            CACHED_GZ_PATH
+        )
+
+        return CACHED_GZ_PATH
+
+    except Exception:
+
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
+
+        raise
+
+
+def decompress_model(
+    gz_path: Path
+) -> Path:
+    """Decompress the remote .pkl.gz model."""
+
+    logger.info(
+        "Decompressing CITY NERVE model..."
+    )
+
+    temp_pkl = (
+        RUNTIME_DIR /
+        "city_nerve_risk_model.decompress.tmp.pkl"
+    )
+
+    try:
+        if temp_pkl.exists():
+            temp_pkl.unlink()
+    except Exception:
+        pass
+
+    try:
+
+        with gzip.open(
+            gz_path,
+            "rb"
+        ) as source:
+
+            with open(
+                temp_pkl,
+                "wb"
+            ) as destination:
+
+                shutil.copyfileobj(
+                    source,
+                    destination,
+                    length=1024 * 1024
+                )
+
+        size = temp_pkl.stat().st_size
+
+        logger.info(
+            "Decompressed model size: %s bytes",
+            size
+        )
+
+        if size < 1024 * 1024:
+            raise RuntimeError(
+                "Decompressed model is suspiciously small."
+            )
+
+        shutil.move(
+            str(temp_pkl),
+            str(CACHED_PKL_PATH)
+        )
+
+        return CACHED_PKL_PATH
+
+    except Exception:
+
+        try:
+            if temp_pkl.exists():
+                temp_pkl.unlink()
+        except Exception:
+            pass
+
+        raise
+
+
+def load_remote_model():
+    """
+    Load the model from Supabase Storage.
+
+    If FORCE_REMOTE_MODEL is false and a valid runtime cache exists,
+    the cache can be reused.
+    """
+
+    global MODEL_SOURCE
+    global MODEL_SHA256
+    global MODEL_SIZE
+
+    # -----------------------------------------------------
+    # Reuse current runtime cache only when remote refresh
+    # is explicitly disabled.
+    # -----------------------------------------------------
+
+    if (
+        CACHED_PKL_PATH.exists()
+        and not FORCE_REMOTE_MODEL
+    ):
+
+        logger.info(
+            "Using cached CITY NERVE remote model."
+        )
+
+        loaded_model = joblib.load(
+            CACHED_PKL_PATH
+        )
+
+        MODEL_SOURCE = (
+            "SUPABASE_CACHE"
+        )
+
+        MODEL_SIZE = (
+            CACHED_PKL_PATH.stat().st_size
+        )
+
+        MODEL_SHA256 = (
+            calculate_sha256(
+                CACHED_PKL_PATH
+            )
+        )
+
+        return loaded_model
+
+    # -----------------------------------------------------
+    # Download fresh remote archive.
+    # -----------------------------------------------------
+
+    gz_path = download_remote_model()
+
+    # -----------------------------------------------------
+    # Decompress.
+    # -----------------------------------------------------
+
+    pkl_path = decompress_model(
+        gz_path
+    )
+
+    # -----------------------------------------------------
+    # Calculate hash before loading.
+    # -----------------------------------------------------
+
+    MODEL_SHA256 = (
+        calculate_sha256(
+            pkl_path
+        )
+    )
+
+    MODEL_SIZE = (
+        pkl_path.stat().st_size
+    )
+
+    logger.info(
+        "Remote model SHA256: %s",
+        MODEL_SHA256
+    )
+
+    # -----------------------------------------------------
+    # Load with joblib.
+    # -----------------------------------------------------
+
+    loaded_model = joblib.load(
+        pkl_path
+    )
+
+    MODEL_SOURCE = (
+        "SUPABASE_REMOTE"
+    )
+
+    logger.info(
+        "================================================="
+    )
+
+    logger.info(
+        "CITY NERVE REMOTE MODEL LOADED SUCCESSFULLY"
+    )
+
+    logger.info(
+        "Source: SUPABASE_REMOTE"
+    )
+
+    logger.info(
+        "Model size: %s bytes",
+        MODEL_SIZE
+    )
+
+    logger.info(
+        "Model SHA256: %s",
+        MODEL_SHA256
+    )
+
+    logger.info(
+        "================================================="
+    )
+
+    return loaded_model
+
+
+def load_local_model():
+    """Load the local .pkl as a safe fallback."""
+
+    global MODEL_SOURCE
+    global MODEL_SHA256
+    global MODEL_SIZE
+
+    if not LOCAL_MODEL_PATH.exists():
+
+        raise FileNotFoundError(
+            f"Local model not found: "
+            f"{LOCAL_MODEL_PATH}"
+        )
+
+    logger.warning(
+        "Loading local CITY NERVE model fallback."
+    )
+
+    loaded_model = joblib.load(
+        LOCAL_MODEL_PATH
+    )
+
+    MODEL_SOURCE = (
+        "LOCAL_FALLBACK"
+    )
+
+    MODEL_SIZE = (
+        LOCAL_MODEL_PATH.stat().st_size
+    )
+
+    MODEL_SHA256 = (
+        calculate_sha256(
+            LOCAL_MODEL_PATH
+        )
+    )
+
+    logger.info(
+        "Local fallback model size: %s bytes",
+        MODEL_SIZE
+    )
+
+    logger.info(
+        "Local fallback model SHA256: %s",
+        MODEL_SHA256
+    )
+
+    return loaded_model
+
+
+# ---------------------------------------------------------
+# MAIN MODEL LOADER
+# ---------------------------------------------------------
 
 try:
-    loaded_config = joblib.load(CONFIG_PATH)
 
-    if isinstance(loaded_config, dict):
-        model_config = loaded_config
+    if REMOTE_MODEL_ENABLED:
+
+        try:
+
+            model = load_remote_model()
+
+        except Exception as remote_exc:
+
+            MODEL_ERROR = (
+                "Remote model failed: "
+                f"{type(remote_exc).__name__}: "
+                f"{remote_exc}"
+            )
+
+            logger.exception(
+                MODEL_ERROR
+            )
+
+            # Keep CITY NERVE operational if Supabase Storage
+            # is temporarily unavailable.
+            model = load_local_model()
+
+    else:
+
+        logger.info(
+            "Remote model loading is disabled."
+        )
+
+        model = load_local_model()
+
+except Exception as exc:
+
+    MODEL_ERROR = (
+        f"Model loading failed: "
+        f"{type(exc).__name__}: {exc}"
+    )
+
+    logger.exception(
+        MODEL_ERROR
+    )
+
+    model = None
+
+
+# =========================================================
+# MODEL CONFIG
+# =========================================================
+
+try:
+
+    loaded_config = joblib.load(
+        CONFIG_PATH
+    )
+
+    if isinstance(
+        loaded_config,
+        dict
+    ):
+
+        model_config = (
+            loaded_config
+        )
 
     logger.info(
         "ML config loaded: %s",
@@ -246,20 +787,33 @@ try:
     )
 
 except Exception as exc:
+
     logger.warning(
         "Could not load ML config: %s",
         exc
     )
 
 
+# =========================================================
+# SHAP
+# =========================================================
+
 if model is not None:
 
     try:
-        explainer = shap.TreeExplainer(model)
 
-        logger.info("SHAP TreeExplainer initialized.")
+        explainer = (
+            shap.TreeExplainer(
+                model
+            )
+        )
+
+        logger.info(
+            "SHAP TreeExplainer initialized."
+        )
 
     except Exception as exc:
+
         logger.warning(
             "SHAP initialization failed: %s",
             exc
@@ -377,7 +931,7 @@ async def http_get(
 
     default_headers = {
         "User-Agent": (
-            "CITY-NERVE/6.0 "
+            "CITY-NERVE/6.1 "
             "(urban-intelligence-hackathon-project)"
         )
     }
@@ -410,7 +964,7 @@ async def http_post(
 
     default_headers = {
         "User-Agent": (
-            "CITY-NERVE/6.0 "
+            "CITY-NERVE/6.1 "
             "(urban-intelligence-hackathon-project)"
         )
     }
@@ -2062,13 +2616,71 @@ def health():
         "service":
             "CITY NERVE API",
 
-        "version":
+        "app_version":
             APP_VERSION,
 
-        "ml_model":
-            "AVAILABLE"
-            if model is not None
-            else "UNAVAILABLE",
+        "model_loaded":
+            model is not None,
+
+        "model_source":
+            MODEL_SOURCE,
+
+        "model_version":
+            "v1",
+
+        "model_bucket":
+            MODEL_BUCKET,
+
+        "model_object":
+            MODEL_OBJECT,
+
+        "remote_model_enabled":
+            REMOTE_MODEL_ENABLED,
+
+        "force_remote_model":
+            FORCE_REMOTE_MODEL,
+
+        "remote_model_url":
+            REMOTE_MODEL_URL,
+
+        "remote_model_url_used":
+            MODEL_REMOTE_URL_USED,
+
+        "loaded_model_size":
+            MODEL_SIZE,
+
+        "loaded_model_sha256":
+            MODEL_SHA256,
+
+        "model_error":
+            MODEL_ERROR,
+
+        "local_pkl_exists":
+            LOCAL_MODEL_PATH.exists(),
+
+        "local_pkl_size":
+            LOCAL_MODEL_PATH.stat().st_size
+            if LOCAL_MODEL_PATH.exists()
+            else 0,
+
+        "cached_pkl_exists":
+            CACHED_PKL_PATH.exists(),
+
+        "cached_pkl_size":
+            CACHED_PKL_PATH.stat().st_size
+            if CACHED_PKL_PATH.exists()
+            else 0,
+
+        "cached_gz_exists":
+            CACHED_GZ_PATH.exists(),
+
+        "cached_gz_size":
+            CACHED_GZ_PATH.stat().st_size
+            if CACHED_GZ_PATH.exists()
+            else 0,
+
+        "config_exists":
+            os.path.exists(CONFIG_PATH),
 
         "shap":
             "AVAILABLE"
@@ -2091,6 +2703,86 @@ def health():
 
         "traffic":
             "DEMO_CONTEXT"
+    }
+
+
+@app.get("/model-status")
+def model_status():
+
+    return {
+        "success":
+            model is not None,
+
+        "model": {
+            "loaded":
+                model is not None,
+
+            "source":
+                MODEL_SOURCE,
+
+            "version":
+                "v1",
+
+            "size_bytes":
+                MODEL_SIZE,
+
+            "sha256":
+                MODEL_SHA256
+        },
+
+        "remote": {
+            "enabled":
+                REMOTE_MODEL_ENABLED,
+
+            "force_refresh":
+                FORCE_REMOTE_MODEL,
+
+            "bucket":
+                MODEL_BUCKET,
+
+            "object":
+                MODEL_OBJECT,
+
+            "url":
+                REMOTE_MODEL_URL,
+
+            "url_used":
+                MODEL_REMOTE_URL_USED
+        },
+
+        "local": {
+            "exists":
+                LOCAL_MODEL_PATH.exists(),
+
+            "path":
+                str(LOCAL_MODEL_PATH),
+
+            "size_bytes":
+                LOCAL_MODEL_PATH.stat().st_size
+                if LOCAL_MODEL_PATH.exists()
+                else 0
+        },
+
+        "cache": {
+            "pkl_exists":
+                CACHED_PKL_PATH.exists(),
+
+            "pkl_size":
+                CACHED_PKL_PATH.stat().st_size
+                if CACHED_PKL_PATH.exists()
+                else 0,
+
+            "gz_exists":
+                CACHED_GZ_PATH.exists(),
+
+            "gz_size":
+                CACHED_GZ_PATH.stat().st_size
+                if CACHED_GZ_PATH.exists()
+                else 0
+        },
+
+        "error":
+            MODEL_ERROR
     }
 
 
