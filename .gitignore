@@ -47,6 +47,7 @@ yarn-error.log*
 backend/city_nerve_risk_model.pkl
 backend/city_nerve_config.pkl
 backend/*.pkl
+backend/.city_nerve_cache/
 
 # Logs
 *.log
